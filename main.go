@@ -36,5 +36,5 @@ func main() {
 		}()
 	}
 
-	runClient(addrs)
+	Repl(newClient(addrs))
 }

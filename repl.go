@@ -15,7 +15,6 @@ import (
 	"github.com/google/shlex"
 	"github.com/relab/gorums"
 	"golang.org/x/term"
-	"google.golang.org/protobuf/types/known/timestamppb"
 )
 
 var help = `
@@ -53,15 +52,13 @@ The command performs the write quorum call on node 0 and 2
 `
 
 type repl struct {
-	mgr  *proto.Manager
-	cfg  *proto.Configuration
+	*client
 	term *term.Terminal
 }
 
-func newRepl(mgr *proto.Manager, cfg *proto.Configuration) *repl {
+func newRepl(c *client) *repl {
 	return &repl{
-		mgr: mgr,
-		cfg: cfg,
+		client: c,
 		term: term.NewTerminal(struct {
 			io.Reader
 			io.Writer
@@ -91,8 +88,8 @@ func (r repl) ReadLine() (string, error) {
 
 // Repl runs an interactive Read-eval-print loop, that allows users to run commands that perform
 // RPCs and quorum calls using the manager and configuration.
-func Repl(mgr *proto.Manager, defaultCfg *proto.Configuration) {
-	r := newRepl(mgr, defaultCfg)
+func Repl(c *client) {
+	r := newRepl(c)
 
 	fmt.Println(help)
 	for {
@@ -132,7 +129,7 @@ func Repl(mgr *proto.Manager, defaultCfg *proto.Configuration) {
 			r.multicast(args[1:])
 		case "nodes":
 			fmt.Println("Nodes: ")
-			for i, n := range mgr.Nodes() {
+			for i, n := range r.mgr.Nodes() {
 				fmt.Printf("%d: %s\n", i, n.Address())
 			}
 		default:
@@ -215,120 +212,6 @@ func (r repl) qcCfg(args []string) {
 	case "list":
 		r.listQC(r.cfg)
 	}
-}
-
-func (repl) readRPC(args []string, node *proto.Node) {
-	if len(args) < 1 {
-		fmt.Println("Read requires a key to read.")
-		return
-	}
-	ctx, cancel := context.WithTimeout(context.Background(), time.Second)
-	resp, err := node.ReadRPC(ctx, &proto.ReadRequest{Key: args[0]})
-	cancel()
-	if err != nil {
-		fmt.Printf("Read RPC finished with error: %v\n", err)
-		return
-	}
-	if !resp.GetOK() {
-		fmt.Printf("%s was not found\n", args[0])
-		return
-	}
-	fmt.Printf("%s = %s\n", args[0], resp.GetValue())
-}
-
-func (repl) writeRPC(args []string, node *proto.Node) {
-	if len(args) < 2 {
-		fmt.Println("Write requires a key and a value to write.")
-		return
-	}
-	ctx, cancel := context.WithTimeout(context.Background(), time.Second)
-	resp, err := node.WriteRPC(ctx, &proto.WriteRequest{Key: args[0], Value: args[1], Time: timestamppb.Now()})
-	cancel()
-	if err != nil {
-		fmt.Printf("Write RPC finished with error: %v\n", err)
-		return
-	}
-	if !resp.GetNew() {
-		fmt.Printf("Failed to update %s: timestamp too old.\n", args[0])
-		return
-	}
-	fmt.Println("Write OK")
-}
-
-func (repl) listKeysRPC(node *proto.Node) {
-	ctx, cancel := context.WithTimeout(context.Background(), time.Second)
-	resp, err := node.ListKeysRPC(ctx, &proto.ListRequest{})
-	cancel()
-	if err != nil {
-		fmt.Printf("ListKeys RPC finished with error: %v\n", err)
-		return
-	}
-
-	keys := ""
-	for _, k := range resp.GetKeys() {
-		keys += k + ", "
-	}
-	fmt.Println("Keys found: ", keys)
-}
-
-func (repl) readQC(args []string, cfg *proto.Configuration) {
-	if len(args) < 1 {
-		fmt.Println("Read requires a key to read.")
-		return
-	}
-	ctx, cancel := context.WithTimeout(context.Background(), time.Second)
-	resp, err := cfg.ReadQC(ctx, &proto.ReadRequest{Key: args[0]})
-	cancel()
-	if err != nil {
-		fmt.Printf("Read RPC finished with error: %v\n", err)
-		return
-	}
-	if !resp.GetOK() {
-		fmt.Printf("%s was not found\n", args[0])
-		return
-	}
-	fmt.Printf("%s = %s\n", args[0], resp.GetValue())
-}
-
-func (repl) writeQC(args []string, cfg *proto.Configuration) {
-	if len(args) < 2 {
-		fmt.Println("Write requires a key and a value to write.")
-		return
-	}
-	ctx, cancel := context.WithTimeout(context.Background(), time.Second)
-	resp, err := cfg.WriteQC(ctx, &proto.WriteRequest{Key: args[0], Value: args[1], Time: timestamppb.Now()})
-	cancel()
-	if err != nil {
-		fmt.Printf("Write RPC finished with error: %v\n", err)
-		return
-	}
-	if !resp.GetNew() {
-		fmt.Printf("Failed to update %s: timestamp too old.\n", args[0])
-		return
-	}
-	fmt.Println("Write OK")
-}
-
-func (repl) listQC(cfg *proto.Configuration) {
-
-	ctx, cancel := context.WithTimeout(context.Background(), time.Second)
-	resp, err := cfg.ListKeysQC(ctx, &proto.ListRequest{})
-	cancel()
-	if err != nil {
-		fmt.Printf("ListKeys RPC finished with error: %v\n", err)
-		return
-	}
-
-	if len(resp.GetKeys()) == 0 {
-		fmt.Println("No keys found.")
-		return
-	}
-
-	keys := ""
-	for _, k := range resp.GetKeys() {
-		keys += k + ", "
-	}
-	fmt.Println("Keys found: ", keys)
 }
 
 func (r repl) parseConfiguration(cfgStr string) (cfg *proto.Configuration) {

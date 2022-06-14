@@ -1,6 +1,8 @@
 package main
 
 import (
+	"context"
+	"fmt"
 	"log"
 	"time"
 
@@ -9,9 +11,15 @@ import (
 	"github.com/relab/gorums"
 	"google.golang.org/grpc"
 	"google.golang.org/grpc/credentials/insecure"
+	"google.golang.org/protobuf/types/known/timestamppb"
 )
 
-func runClient(addresses []string) {
+type client struct {
+	mgr *proto.Manager
+	cfg *proto.Configuration
+}
+
+func newClient(addresses []string) *client {
 	if len(addresses) < 1 {
 		log.Fatalln("No addresses provided!")
 	}
@@ -30,86 +38,122 @@ func runClient(addresses []string) {
 		log.Fatal(err)
 	}
 
-	Repl(mgr, cfg)
+	return &client{
+		mgr: mgr,
+		cfg: cfg,
+	}
 }
 
-type qspec struct {
-	cfgSize int
+func (client) readRPC(args []string, node *proto.Node) {
+	if len(args) < 1 {
+		fmt.Println("Read requires a key to read.")
+		return
+	}
+	ctx, cancel := context.WithTimeout(context.Background(), time.Second)
+	resp, err := node.ReadRPC(ctx, &proto.ReadRequest{Key: args[0]})
+	cancel()
+	if err != nil {
+		fmt.Printf("Read RPC finished with error: %v\n", err)
+		return
+	}
+	if !resp.GetOK() {
+		fmt.Printf("%s was not found\n", args[0])
+		return
+	}
+	fmt.Printf("%s = %s\n", args[0], resp.GetValue())
 }
 
-// ReadQCQF is the quorum function for the ReadQC
-// ordered quorum call method. The in parameter is the request object
-// supplied to the ReadQC method at call time, and may or may not
-// be used by the quorum function. If the in parameter is not needed
-// you should implement your quorum function with '_ *ReadRequest'.
-func (q qspec) ReadQCQF(_ *proto.ReadRequest, replies map[uint32]*proto.ReadResponse) (*proto.ReadResponse, bool) {
-	// wait until at least half of the replicas have responded
-	if len(replies) <= q.cfgSize/2 {
-		return nil, false
+func (client) writeRPC(args []string, node *proto.Node) {
+	if len(args) < 2 {
+		fmt.Println("Write requires a key and a value to write.")
+		return
 	}
-	// return the value with the most recent timestamp
-	return newestValue(replies), true
+	ctx, cancel := context.WithTimeout(context.Background(), time.Second)
+	resp, err := node.WriteRPC(ctx, &proto.WriteRequest{Key: args[0], Value: args[1], Time: timestamppb.Now()})
+	cancel()
+	if err != nil {
+		fmt.Printf("Write RPC finished with error: %v\n", err)
+		return
+	}
+	if !resp.GetNew() {
+		fmt.Printf("Failed to update %s: timestamp too old.\n", args[0])
+		return
+	}
+	fmt.Println("Write OK")
 }
 
-// WriteQCQF is the quorum function for the WriteQC
-// ordered quorum call method. The in parameter is the request object
-// supplied to the WriteQC method at call time, and may or may not
-// be used by the quorum function. If the in parameter is not needed
-// you should implement your quorum function with '_ *WriteRequest'.
-func (q qspec) WriteQCQF(in *proto.WriteRequest, replies map[uint32]*proto.WriteResponse) (*proto.WriteResponse, bool) {
-	// wait until at least half of the replicas have responded and have updated their value
-	if numUpdated(replies) <= q.cfgSize/2 {
-		// if all replicas have responded, there must have been another write before ours
-		// that had a newer timestamp
-		if len(replies) == q.cfgSize {
-			return &proto.WriteResponse{New: false}, true
-		}
-		return nil, false
+func (client) listKeysRPC(node *proto.Node) {
+	ctx, cancel := context.WithTimeout(context.Background(), time.Second)
+	resp, err := node.ListKeysRPC(ctx, &proto.ListRequest{})
+	cancel()
+	if err != nil {
+		fmt.Printf("ListKeys RPC finished with error: %v\n", err)
+		return
 	}
-	return &proto.WriteResponse{New: true}, true
+
+	keys := ""
+	for _, k := range resp.GetKeys() {
+		keys += k + ", "
+	}
+	fmt.Println("Keys found: ", keys)
 }
 
-func (q qspec) ListKeysQCQF(in *proto.ListRequest, replies map[uint32]*proto.ListResponse) (*proto.ListResponse, bool) {
-	if len(replies) <= q.cfgSize/2 {
-		return nil, false
+func (client) readQC(args []string, cfg *proto.Configuration) {
+	if len(args) < 1 {
+		fmt.Println("Read requires a key to read.")
+		return
 	}
-	var keys map[string]bool
-	for _, resp := range replies {
-		if len(keys) == 0 {
-			keys = make(map[string]bool, len(resp.GetKeys()))
-		}
-		for _, k := range resp.GetKeys() {
-			keys[k] = true
-		}
+	ctx, cancel := context.WithTimeout(context.Background(), time.Second)
+	resp, err := cfg.ReadQC(ctx, &proto.ReadRequest{Key: args[0]})
+	cancel()
+	if err != nil {
+		fmt.Printf("Read RPC finished with error: %v\n", err)
+		return
 	}
-	allkeys := make([]string, 0, len(keys))
-	for k := range keys {
-		allkeys = append(allkeys, k)
+	if !resp.GetOK() {
+		fmt.Printf("%s was not found\n", args[0])
+		return
 	}
-	return &proto.ListResponse{Keys: allkeys}, true
+	fmt.Printf("%s = %s\n", args[0], resp.GetValue())
 }
 
-// newestValue returns the reply that had the most recent timestamp
-func newestValue(values map[uint32]*proto.ReadResponse) *proto.ReadResponse {
-	if len(values) < 1 {
-		return nil
+func (client) writeQC(args []string, cfg *proto.Configuration) {
+	if len(args) < 2 {
+		fmt.Println("Write requires a key and a value to write.")
+		return
 	}
-	var newest *proto.ReadResponse
-	for _, v := range values {
-		if v.GetTime().AsTime().After(newest.GetTime().AsTime()) {
-			newest = v
-		}
+	ctx, cancel := context.WithTimeout(context.Background(), time.Second)
+	resp, err := cfg.WriteQC(ctx, &proto.WriteRequest{Key: args[0], Value: args[1], Time: timestamppb.Now()})
+	cancel()
+	if err != nil {
+		fmt.Printf("Write RPC finished with error: %v\n", err)
+		return
 	}
-	return newest
+	if !resp.GetNew() {
+		fmt.Printf("Failed to update %s: timestamp too old.\n", args[0])
+		return
+	}
+	fmt.Println("Write OK")
 }
 
-// numUpdated returns the number of replicas that updated their value
-func numUpdated(replies map[uint32]*proto.WriteResponse) int {
-	count := 0
-	for _, r := range replies {
-		if r.GetNew() {
-			count++
-		}
+func (client) listQC(cfg *proto.Configuration) {
+
+	ctx, cancel := context.WithTimeout(context.Background(), time.Second)
+	resp, err := cfg.ListKeysQC(ctx, &proto.ListRequest{})
+	cancel()
+	if err != nil {
+		fmt.Printf("ListKeys RPC finished with error: %v\n", err)
+		return
 	}
-	return count
+
+	if len(resp.GetKeys()) == 0 {
+		fmt.Println("No keys found.")
+		return
+	}
+
+	keys := ""
+	for _, k := range resp.GetKeys() {
+		keys += k + ", "
+	}
+	fmt.Println("Keys found: ", keys)
 }
