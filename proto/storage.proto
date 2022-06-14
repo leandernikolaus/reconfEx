@@ -27,6 +27,12 @@ service Storage {
   rpc WriteMulticast(WriteRequest) returns (google.protobuf.Empty) {
     option (gorums.multicast) = true;
   }
+
+  rpc ListKeysRPC(ListRequest) returns (ListResponse) {}
+
+  rpc ListKeysQC(ListRequest) returns (ListResponse) {
+    option (gorums.quorumcall) = true;
+  }
 }
 
 message ReadRequest { string Key = 1; }
@@ -44,3 +50,9 @@ message WriteRequest {
 }
 
 message WriteResponse { bool New = 1; }
+
+message ListRequest { }
+
+message ListResponse {
+  repeated string Keys = 1;
+}

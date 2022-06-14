@@ -94,6 +94,14 @@ func (s *storageServer) WriteQC(_ gorums.ServerCtx, req *proto.WriteRequest) (re
 	return s.Write(req)
 }
 
+func (s *storageServer) ListKeysRPC(_ gorums.ServerCtx, req *proto.ListRequest) (*proto.ListResponse, error) {
+	return s.ListKeys(req)
+}
+
+func (s *storageServer) ListKeysQC(_ gorums.ServerCtx, req *proto.ListRequest) (*proto.ListResponse, error) {
+	return s.ListKeys(req)
+}
+
 func (s *storageServer) WriteMulticast(_ gorums.ServerCtx, req *proto.WriteRequest) {
 	_, err := s.Write(req)
 	if err != nil {
@@ -124,4 +132,18 @@ func (s *storageServer) Write(req *proto.WriteRequest) (*proto.WriteResponse, er
 	}
 	s.storage[req.GetKey()] = state{Value: req.GetValue(), Time: req.GetTime().AsTime()}
 	return &proto.WriteResponse{New: true}, nil
+}
+
+// Write writes a new value to storage if it is newer than the old value
+func (s *storageServer) ListKeys(req *proto.ListRequest) (*proto.ListResponse, error) {
+	s.logger.Printf("List request")
+	s.mut.Lock()
+	defer s.mut.Unlock()
+	keys := make([]string, 0, len(s.storage))
+
+	for k := range s.storage {
+		keys = append(keys, k)
+	}
+
+	return &proto.ListResponse{Keys: keys}, nil
 }

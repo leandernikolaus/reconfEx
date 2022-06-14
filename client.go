@@ -69,6 +69,26 @@ func (q qspec) WriteQCQF(in *proto.WriteRequest, replies map[uint32]*proto.Write
 	return &proto.WriteResponse{New: true}, true
 }
 
+func (q qspec) ListKeysQCQF(in *proto.ListRequest, replies map[uint32]*proto.ListResponse) (*proto.ListResponse, bool) {
+	if len(replies) <= q.cfgSize/2 {
+		return nil, false
+	}
+	var keys map[string]bool
+	for _, resp := range replies {
+		if len(keys) == 0 {
+			keys = make(map[string]bool, len(resp.GetKeys()))
+		}
+		for _, k := range resp.GetKeys() {
+			keys[k] = true
+		}
+	}
+	allkeys := make([]string, 0, len(keys))
+	for k := range keys {
+		allkeys = append(allkeys, k)
+	}
+	return &proto.ListResponse{Keys: allkeys}, true
+}
+
 // newestValue returns the reply that had the most recent timestamp
 func newestValue(values map[uint32]*proto.ReadResponse) *proto.ReadResponse {
 	if len(values) < 1 {

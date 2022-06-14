@@ -165,6 +165,8 @@ func (r repl) rpc(args []string) {
 		r.readRPC(args[2:], node)
 	case "write":
 		r.writeRPC(args[2:], node)
+	case "list":
+		r.listKeysRPC(node)
 	}
 }
 
@@ -191,6 +193,8 @@ func (r repl) qc(args []string) {
 		r.readQC(args[1:], r.cfg)
 	case "write":
 		r.writeQC(args[1:], r.cfg)
+	case "list":
+		r.listQC(r.cfg)
 	}
 }
 
@@ -208,6 +212,8 @@ func (r repl) qcCfg(args []string) {
 		r.readQC(args[2:], cfg)
 	case "write":
 		r.writeQC(args[2:], cfg)
+	case "list":
+		r.listQC(r.cfg)
 	}
 }
 
@@ -249,6 +255,22 @@ func (repl) writeRPC(args []string, node *proto.Node) {
 	fmt.Println("Write OK")
 }
 
+func (repl) listKeysRPC(node *proto.Node) {
+	ctx, cancel := context.WithTimeout(context.Background(), time.Second)
+	resp, err := node.ListKeysRPC(ctx, &proto.ListRequest{})
+	cancel()
+	if err != nil {
+		fmt.Printf("ListKeys RPC finished with error: %v\n", err)
+		return
+	}
+
+	keys := ""
+	for _, k := range resp.GetKeys() {
+		keys += k + ", "
+	}
+	fmt.Println("Keys found: ", keys)
+}
+
 func (repl) readQC(args []string, cfg *proto.Configuration) {
 	if len(args) < 1 {
 		fmt.Println("Read requires a key to read.")
@@ -285,6 +307,28 @@ func (repl) writeQC(args []string, cfg *proto.Configuration) {
 		return
 	}
 	fmt.Println("Write OK")
+}
+
+func (repl) listQC(cfg *proto.Configuration) {
+
+	ctx, cancel := context.WithTimeout(context.Background(), time.Second)
+	resp, err := cfg.ListKeysQC(ctx, &proto.ListRequest{})
+	cancel()
+	if err != nil {
+		fmt.Printf("ListKeys RPC finished with error: %v\n", err)
+		return
+	}
+
+	if len(resp.GetKeys()) == 0 {
+		fmt.Println("No keys found.")
+		return
+	}
+
+	keys := ""
+	for _, k := range resp.GetKeys() {
+		keys += k + ", "
+	}
+	fmt.Println("Keys found: ", keys)
 }
 
 func (r repl) parseConfiguration(cfgStr string) (cfg *proto.Configuration) {
