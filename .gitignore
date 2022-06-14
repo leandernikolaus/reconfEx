@@ -1,0 +1,4 @@
+examplestorage
+
+proto/storage.pb.go
+proto/storage_gorums.pb.go
