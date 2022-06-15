@@ -51,7 +51,7 @@ func newClient(addresses []string) *client {
 }
 
 // find config with minimal timestamp
-// return key
+// return its key
 func getMin(configs map[string]*proto.Config) string {
 	if len(configs) == 0 {
 		return ""
@@ -67,35 +67,46 @@ func getMin(configs map[string]*proto.Config) string {
 	return min
 }
 
+// addConfigs checks newconfigs for once that are newer than cur
+// newer confgs are added to the confmap
+// if a newer started configuration is found, this is the only returned function
+// and the client state is updated
+func (c *client) addConfigs(confmap map[string]*proto.Config, cur *proto.Config, newconfigs []*proto.Config) map[string]*proto.Config {
+	for _, cc := range newconfigs {
+		if TimeBefore(cur.GetTime(), cc.GetTime()) {
+			if cc.GetStarted() {
+				//empty map
+				confmap = make(map[string]*proto.Config, 1)
+
+				//update client state
+				c.pcfg = cc
+
+			}
+			confmap[cc.GetTime().String()] = cc
+		}
+	}
+	return confmap
+}
+
 func TimeBefore(a, b *timestamppb.Timestamp) bool {
 	return a.AsTime().Before(b.AsTime())
 }
 
 func (c *client) read(key string) *proto.ReadResponse {
-	cfgs := map[string]*proto.Config{c.pcfg.Time.String(): c.pcfg}
+	confmap := map[string]*proto.Config{c.pcfg.Time.String(): c.pcfg}
 	resp := &proto.ReadResponse{Time: &timestamppb.Timestamp{Seconds: 0, Nanos: 0}}
 
-	for s := getMin(cfgs); s != ""; {
-		cfg := c.parseConfiguration(cfgs[s].Adds)
-		rresp := c.readQC(key, cfg)
+	for min := getMin(confmap); min != ""; {
+		cfg := c.parseConfiguration(confmap[min].Adds)
+		minresp := c.readQC(key, cfg)
 
 		// remember Value, if it has larger Time
-		if TimeBefore(resp.GetTime(), rresp.GetTime()) {
-			resp = rresp
+		if TimeBefore(resp.GetTime(), minresp.GetTime()) {
+			resp = minresp
 		}
 
-		// add configurations to map
-		for _, cc := range rresp.Config {
-			if TimeBefore(cfgs[s].GetTime(), cc.GetTime()) {
-				if cc.GetStarted() {
-					cfgs = make(map[string]*proto.Config, 1)
-					c.pcfg = cc
-				}
-				cfgs[cc.GetTime().String()] = cc
-			}
-		}
-
-		delete(cfgs, s)
+		confmap = c.addConfigs(confmap, confmap[min], minresp.GetConfig())
+		delete(confmap, min)
 	}
 	return resp
 }
@@ -111,6 +122,24 @@ func (client) readQC(key string, cfg *proto.Configuration) *proto.ReadResponse {
 	return resp
 }
 
+func (c *client) write(key, value string) *proto.WriteResponse {
+	confmap := map[string]*proto.Config{c.pcfg.Time.String(): c.pcfg}
+
+	new := true
+
+	for min := getMin(confmap); min != ""; {
+		cfg := c.parseConfiguration(confmap[min].Adds)
+		minresp := c.writeQC(key, value, cfg)
+
+		new = new && minresp.GetNew()
+
+		confmap = c.addConfigs(confmap, confmap[min], minresp.GetConfig())
+		delete(confmap, min)
+
+	}
+	return &proto.WriteResponse{New: new}
+}
+
 func (client) writeQC(key, value string, cfg *proto.Configuration) *proto.WriteResponse {
 	ctx, cancel := context.WithTimeout(context.Background(), time.Second)
 	resp, err := cfg.WriteQC(ctx, &proto.WriteRequest{Key: key, Value: value, Time: timestamppb.Now()})
@@ -120,6 +149,35 @@ func (client) writeQC(key, value string, cfg *proto.Configuration) *proto.WriteR
 		return nil
 	}
 	return resp
+}
+
+func (c *client) list() *proto.ListResponse {
+	confmap := map[string]*proto.Config{c.pcfg.Time.String(): c.pcfg}
+
+	var keys map[string]bool
+
+	for min := getMin(confmap); min != ""; {
+		cfg := c.parseConfiguration(confmap[min].Adds)
+		minresp := c.listQC(cfg)
+
+		if len(keys) == 0 {
+			keys = make(map[string]bool, len(minresp.GetKeys()))
+		}
+		for _, k := range minresp.GetKeys() {
+			keys[k] = true
+		}
+
+		confmap = c.addConfigs(confmap, confmap[min], minresp.GetConfig())
+		delete(confmap, min)
+
+	}
+
+	allkeys := make([]string, 0, len(keys))
+	for k := range keys {
+		allkeys = append(allkeys, k)
+	}
+
+	return &proto.ListResponse{Keys: allkeys}
 }
 
 func (client) listQC(cfg *proto.Configuration) *proto.ListResponse {
@@ -154,7 +212,10 @@ func (c *client) reconf(newAdds string) {
 	// transfer state
 	list := c.listQC(c.cfg)
 	for _, key := range list.GetKeys() {
-		value := c.readQC(key, c.cfg)
+		value := c.read(key)
+
+		//TODO: abort if a start configuration with larger timestamp than goalCfg is found
+
 		if value.GetOK() {
 			c.writeQC(key, value.GetValue(), goalCfg)
 		}

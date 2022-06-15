@@ -57,7 +57,7 @@ func (q qspec) ListKeysQCQF(in *proto.ListRequest, replies map[uint32]*proto.Lis
 	for k := range keys {
 		allkeys = append(allkeys, k)
 	}
-	return &proto.ListResponse{Keys: allkeys}, true
+	return &proto.ListResponse{Keys: allkeys, Config: listCombineConfs(replies)}, true
 }
 
 func (q qspec) WriteConfigQCQF(in *proto.Config, replies map[uint32]*proto.WriteResponse) (*proto.WriteResponse, bool) {
@@ -96,6 +96,14 @@ func numUpdated(replies map[uint32]*proto.WriteResponse) int {
 		}
 	}
 	return count
+}
+
+func listCombineConfs(replies map[uint32]*proto.ListResponse) []*proto.Config {
+	configlists := make([][]*proto.Config, len(replies))
+	for _, wr := range replies {
+		configlists = append(configlists, wr.GetConfig())
+	}
+	return combineConfs(configlists)
 }
 
 func writeCombineConfs(replies map[uint32]*proto.WriteResponse) []*proto.Config {

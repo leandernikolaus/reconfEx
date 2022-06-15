@@ -177,5 +177,5 @@ func (s *storageServer) ListKeys(req *proto.ListRequest) (*proto.ListResponse, e
 		keys = append(keys, k)
 	}
 
-	return &proto.ListResponse{Keys: keys}, nil
+	return &proto.ListResponse{Keys: keys, Config: s.configs}, nil
 }
