@@ -33,11 +33,11 @@ func (q qspec) WriteQCQF(in *proto.WriteRequest, replies map[uint32]*proto.Write
 		// if all replicas have responded, there must have been another write before ours
 		// that had a newer timestamp
 		if len(replies) == q.cfgSize {
-			return &proto.WriteResponse{New: false}, true
+			return &proto.WriteResponse{New: false, Config: writeCombineConfs(replies)}, true
 		}
 		return nil, false
 	}
-	return &proto.WriteResponse{New: true}, true
+	return &proto.WriteResponse{New: true, Config: writeCombineConfs(replies)}, true
 }
 
 func (q qspec) ListKeysQCQF(in *proto.ListRequest, replies map[uint32]*proto.ListResponse) (*proto.ListResponse, bool) {
@@ -60,6 +60,18 @@ func (q qspec) ListKeysQCQF(in *proto.ListRequest, replies map[uint32]*proto.Lis
 	return &proto.ListResponse{Keys: allkeys}, true
 }
 
+func (q qspec) WriteConfigQCQF(in *proto.Config, replies map[uint32]*proto.WriteResponse) (*proto.WriteResponse, bool) {
+	if numUpdated(replies) <= q.cfgSize/2 {
+		// if all replicas have responded, there must have been another write before ours
+		// that had a newer timestamp
+		if len(replies) == q.cfgSize {
+			return &proto.WriteResponse{New: false, Config: writeCombineConfs(replies)}, true
+		}
+		return nil, false
+	}
+	return &proto.WriteResponse{New: true, Config: writeCombineConfs(replies)}, true
+}
+
 // newestValue returns the reply that had the most recent timestamp
 func newestValue(values map[uint32]*proto.ReadResponse) *proto.ReadResponse {
 	if len(values) < 1 {
@@ -71,6 +83,7 @@ func newestValue(values map[uint32]*proto.ReadResponse) *proto.ReadResponse {
 			newest = v
 		}
 	}
+	newest.Config = readCombineConfs(values)
 	return newest
 }
 
@@ -83,4 +96,44 @@ func numUpdated(replies map[uint32]*proto.WriteResponse) int {
 		}
 	}
 	return count
+}
+
+func writeCombineConfs(replies map[uint32]*proto.WriteResponse) []*proto.Config {
+	configlists := make([][]*proto.Config, len(replies))
+	for _, wr := range replies {
+		configlists = append(configlists, wr.GetConfig())
+	}
+	return combineConfs(configlists)
+}
+
+func readCombineConfs(replies map[uint32]*proto.ReadResponse) []*proto.Config {
+	configlists := make([][]*proto.Config, len(replies))
+	for _, rr := range replies {
+		configlists = append(configlists, rr.GetConfig())
+	}
+	return combineConfs(configlists)
+}
+
+func combineConfs(configlists [][]*proto.Config) []*proto.Config {
+	if len(configlists) == 0 {
+		return nil
+	}
+	confs := make(map[struct {
+		int64
+		int32
+	}]*proto.Config, len(configlists[0]))
+	for _, list := range configlists {
+		for _, c := range list {
+			confs[struct {
+				int64
+				int32
+			}{c.GetTime().Seconds, c.GetTime().Nanos}] = c
+		}
+	}
+
+	list := make([]*proto.Config, 0, len(confs))
+	for _, c := range confs {
+		list = append(list, c)
+	}
+	return list
 }

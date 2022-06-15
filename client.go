@@ -4,6 +4,8 @@ import (
 	"context"
 	"fmt"
 	"log"
+	"strconv"
+	"strings"
 	"time"
 
 	"examplestorage/proto"
@@ -15,8 +17,9 @@ import (
 )
 
 type client struct {
-	mgr *proto.Manager
-	cfg *proto.Configuration
+	mgr  *proto.Manager
+	cfg  *proto.Configuration
+	pcfg *proto.Config
 }
 
 func newClient(addresses []string) *client {
@@ -38,122 +41,193 @@ func newClient(addresses []string) *client {
 		log.Fatal(err)
 	}
 
+	pcfg := &proto.Config{Adds: "0-" + fmt.Sprint(len(addresses)), Time: &timestamppb.Timestamp{Seconds: 0, Nanos: 0}}
+
 	return &client{
-		mgr: mgr,
-		cfg: cfg,
+		mgr:  mgr,
+		cfg:  cfg,
+		pcfg: pcfg,
 	}
 }
 
-func (client) readRPC(args []string, node *proto.Node) {
-	if len(args) < 1 {
-		fmt.Println("Read requires a key to read.")
-		return
+// find config with minimal timestamp
+// return key
+func getMin(configs map[string]*proto.Config) string {
+	if len(configs) == 0 {
+		return ""
 	}
+
+	var min string
+
+	for s, config := range configs {
+		if min == "" || config.Time.AsTime().After(configs[min].Time.AsTime()) {
+			min = s
+		}
+	}
+	return min
+}
+
+func TimeBefore(a, b *timestamppb.Timestamp) bool {
+	return a.AsTime().Before(b.AsTime())
+}
+
+func (c *client) read(key string) *proto.ReadResponse {
+	cfgs := map[string]*proto.Config{c.pcfg.Time.String(): c.pcfg}
+	resp := &proto.ReadResponse{Time: &timestamppb.Timestamp{Seconds: 0, Nanos: 0}}
+
+	for s := getMin(cfgs); s != ""; {
+		cfg := c.parseConfiguration(cfgs[s].Adds)
+		rresp := c.readQC(key, cfg)
+
+		// remember Value, if it has larger Time
+		if TimeBefore(resp.GetTime(), rresp.GetTime()) {
+			resp = rresp
+		}
+
+		// add configurations to map
+		for _, cc := range rresp.Config {
+			if TimeBefore(cfgs[s].GetTime(), cc.GetTime()) {
+				if cc.GetStarted() {
+					cfgs = make(map[string]*proto.Config, 1)
+					c.pcfg = cc
+				}
+				cfgs[cc.GetTime().String()] = cc
+			}
+		}
+
+		delete(cfgs, s)
+	}
+	return resp
+}
+
+func (client) readQC(key string, cfg *proto.Configuration) *proto.ReadResponse {
 	ctx, cancel := context.WithTimeout(context.Background(), time.Second)
-	resp, err := node.ReadRPC(ctx, &proto.ReadRequest{Key: args[0]})
+	resp, err := cfg.ReadQC(ctx, &proto.ReadRequest{Key: key})
 	cancel()
 	if err != nil {
 		fmt.Printf("Read RPC finished with error: %v\n", err)
-		return
+		return nil
 	}
-	if !resp.GetOK() {
-		fmt.Printf("%s was not found\n", args[0])
-		return
-	}
-	fmt.Printf("%s = %s\n", args[0], resp.GetValue())
+	return resp
 }
 
-func (client) writeRPC(args []string, node *proto.Node) {
-	if len(args) < 2 {
-		fmt.Println("Write requires a key and a value to write.")
-		return
-	}
+func (client) writeQC(key, value string, cfg *proto.Configuration) *proto.WriteResponse {
 	ctx, cancel := context.WithTimeout(context.Background(), time.Second)
-	resp, err := node.WriteRPC(ctx, &proto.WriteRequest{Key: args[0], Value: args[1], Time: timestamppb.Now()})
+	resp, err := cfg.WriteQC(ctx, &proto.WriteRequest{Key: key, Value: value, Time: timestamppb.Now()})
 	cancel()
 	if err != nil {
 		fmt.Printf("Write RPC finished with error: %v\n", err)
-		return
+		return nil
 	}
-	if !resp.GetNew() {
-		fmt.Printf("Failed to update %s: timestamp too old.\n", args[0])
-		return
-	}
-	fmt.Println("Write OK")
+	return resp
 }
 
-func (client) listKeysRPC(node *proto.Node) {
-	ctx, cancel := context.WithTimeout(context.Background(), time.Second)
-	resp, err := node.ListKeysRPC(ctx, &proto.ListRequest{})
-	cancel()
-	if err != nil {
-		fmt.Printf("ListKeys RPC finished with error: %v\n", err)
-		return
-	}
-
-	keys := ""
-	for _, k := range resp.GetKeys() {
-		keys += k + ", "
-	}
-	fmt.Println("Keys found: ", keys)
-}
-
-func (client) readQC(args []string, cfg *proto.Configuration) {
-	if len(args) < 1 {
-		fmt.Println("Read requires a key to read.")
-		return
-	}
-	ctx, cancel := context.WithTimeout(context.Background(), time.Second)
-	resp, err := cfg.ReadQC(ctx, &proto.ReadRequest{Key: args[0]})
-	cancel()
-	if err != nil {
-		fmt.Printf("Read RPC finished with error: %v\n", err)
-		return
-	}
-	if !resp.GetOK() {
-		fmt.Printf("%s was not found\n", args[0])
-		return
-	}
-	fmt.Printf("%s = %s\n", args[0], resp.GetValue())
-}
-
-func (client) writeQC(args []string, cfg *proto.Configuration) {
-	if len(args) < 2 {
-		fmt.Println("Write requires a key and a value to write.")
-		return
-	}
-	ctx, cancel := context.WithTimeout(context.Background(), time.Second)
-	resp, err := cfg.WriteQC(ctx, &proto.WriteRequest{Key: args[0], Value: args[1], Time: timestamppb.Now()})
-	cancel()
-	if err != nil {
-		fmt.Printf("Write RPC finished with error: %v\n", err)
-		return
-	}
-	if !resp.GetNew() {
-		fmt.Printf("Failed to update %s: timestamp too old.\n", args[0])
-		return
-	}
-	fmt.Println("Write OK")
-}
-
-func (client) listQC(cfg *proto.Configuration) {
-
+func (client) listQC(cfg *proto.Configuration) *proto.ListResponse {
 	ctx, cancel := context.WithTimeout(context.Background(), time.Second)
 	resp, err := cfg.ListKeysQC(ctx, &proto.ListRequest{})
 	cancel()
 	if err != nil {
 		fmt.Printf("ListKeys RPC finished with error: %v\n", err)
-		return
+		return nil
+	}
+	return resp
+}
+
+func (client) writeConfigQC(conf *proto.Config, cfg *proto.Configuration) *proto.WriteResponse {
+	ctx, cancel := context.WithTimeout(context.Background(), time.Second)
+	resp, err := cfg.WriteConfigQC(ctx, conf)
+	cancel()
+	if err != nil {
+		fmt.Printf("ListKeys RPC finished with error: %v\n", err)
+		return nil
+	}
+	return resp
+}
+
+func (c *client) reconf(newAdds string) {
+
+	goalProtoConf := &proto.Config{Adds: newAdds, Started: false, Time: timestamppb.Now()}
+	goalCfg := c.parseConfiguration(newAdds)
+	// stop old and inform about new config
+	c.writeConfigQC(goalProtoConf, c.cfg)
+
+	// transfer state
+	list := c.listQC(c.cfg)
+	for _, key := range list.GetKeys() {
+		value := c.readQC(key, c.cfg)
+		if value.GetOK() {
+			c.writeQC(key, value.GetValue(), goalCfg)
+		}
 	}
 
-	if len(resp.GetKeys()) == 0 {
-		fmt.Println("No keys found.")
-		return
-	}
+	// start new config
+	goalProtoConf.Started = true
+	c.writeConfigQC(goalProtoConf, goalCfg)
+	c.cfg = goalCfg
+}
 
-	keys := ""
-	for _, k := range resp.GetKeys() {
-		keys += k + ", "
+func (c client) parseConfiguration(cfgStr string) (cfg *proto.Configuration) {
+	// configuration using range syntax
+	if i := strings.Index(cfgStr, ":"); i > -1 {
+		var start, stop int
+		var err error
+		numNodes := c.mgr.Size()
+		if i == 0 {
+			start = 0
+		} else {
+			start, err = strconv.Atoi(cfgStr[:i])
+			if err != nil {
+				fmt.Printf("Failed to parse configuration: %v\n", err)
+				return nil
+			}
+		}
+		if i == len(cfgStr)-1 {
+			stop = numNodes
+		} else {
+			stop, err = strconv.Atoi(cfgStr[i+1:])
+			if err != nil {
+				fmt.Printf("Failed to parse configuration: %v\n", err)
+				return nil
+			}
+		}
+		if start >= stop || start < 0 || stop >= numNodes {
+			fmt.Println("Invalid configuration.")
+			return nil
+		}
+		nodes := make([]string, 0)
+		for _, node := range c.mgr.Nodes()[start:stop] {
+			nodes = append(nodes, node.Address())
+		}
+		cfg, err = c.mgr.NewConfiguration(&qspec{cfgSize: stop - start}, gorums.WithNodeList(nodes))
+		if err != nil {
+			fmt.Printf("Failed to create configuration: %v\n", err)
+			return nil
+		}
+		return cfg
 	}
-	fmt.Println("Keys found: ", keys)
+	// configuration using list of indices
+	if indices := strings.Split(cfgStr, ","); len(indices) > 0 {
+		selectedNodes := make([]string, 0, len(indices))
+		nodes := c.mgr.Nodes()
+		for _, index := range indices {
+			i, err := strconv.Atoi(index)
+			if err != nil {
+				fmt.Printf("Failed to parse configuration: %v\n", err)
+				return nil
+			}
+			if i < 0 || i >= len(nodes) {
+				fmt.Println("Invalid configuration.")
+				return nil
+			}
+			selectedNodes = append(selectedNodes, nodes[i].Address())
+		}
+		cfg, err := c.mgr.NewConfiguration(&qspec{cfgSize: len(selectedNodes)}, gorums.WithNodeList(selectedNodes))
+		if err != nil {
+			fmt.Printf("Failed to create configuration: %v\n", err)
+			return nil
+		}
+		return cfg
+	}
+	fmt.Println("Invalid configuration.")
+	return nil
 }

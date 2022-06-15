@@ -64,6 +64,7 @@ type state struct {
 // storageServer is an implementation of proto.Storage
 type storageServer struct {
 	storage map[string]state
+	configs []*proto.Config
 	mut     sync.RWMutex
 	logger  *log.Logger
 }
@@ -71,6 +72,7 @@ type storageServer struct {
 func newStorageServer() *storageServer {
 	return &storageServer{
 		storage: make(map[string]state),
+		configs: make([]*proto.Config, 0, 1),
 	}
 }
 
@@ -102,6 +104,10 @@ func (s *storageServer) ListKeysQC(_ gorums.ServerCtx, req *proto.ListRequest) (
 	return s.ListKeys(req)
 }
 
+func (s *storageServer) WriteConfigQC(_ gorums.ServerCtx, req *proto.Config) (resp *proto.WriteResponse, err error) {
+	return s.WriteConfig(req)
+}
+
 func (s *storageServer) WriteMulticast(_ gorums.ServerCtx, req *proto.WriteRequest) {
 	_, err := s.Write(req)
 	if err != nil {
@@ -116,9 +122,9 @@ func (s *storageServer) Read(req *proto.ReadRequest) (*proto.ReadResponse, error
 	defer s.mut.RUnlock()
 	state, ok := s.storage[req.GetKey()]
 	if !ok {
-		return &proto.ReadResponse{OK: false}, nil
+		return &proto.ReadResponse{OK: false, Config: s.configs}, nil
 	}
-	return &proto.ReadResponse{OK: true, Value: state.Value, Time: timestamppb.New(state.Time)}, nil
+	return &proto.ReadResponse{OK: true, Value: state.Value, Time: timestamppb.New(state.Time), Config: s.configs}, nil
 }
 
 // Write writes a new value to storage if it is newer than the old value
@@ -128,10 +134,36 @@ func (s *storageServer) Write(req *proto.WriteRequest) (*proto.WriteResponse, er
 	defer s.mut.Unlock()
 	oldState, ok := s.storage[req.GetKey()]
 	if ok && oldState.Time.After(req.GetTime().AsTime()) {
-		return &proto.WriteResponse{New: false}, nil
+		return &proto.WriteResponse{New: false, Config: s.configs}, nil
 	}
 	s.storage[req.GetKey()] = state{Value: req.GetValue(), Time: req.GetTime().AsTime()}
-	return &proto.WriteResponse{New: true}, nil
+	return &proto.WriteResponse{New: true, Config: s.configs}, nil
+}
+
+func (s *storageServer) WriteConfig(req *proto.Config) (*proto.WriteResponse, error) {
+	s.logger.Printf("Config '%s', started: '%t'\n", req.GetAdds(), req.GetStarted())
+	s.mut.Lock()
+	defer s.mut.Unlock()
+
+	if len(s.configs) > 0 && s.configs[0].GetStarted() && s.configs[0].GetTime().AsTime().After(req.GetTime().AsTime()) {
+		// An oldd configuration, ignore
+		return &proto.WriteResponse{New: false, Config: s.configs}, nil
+	}
+
+	if req.GetStarted() {
+		confs := make([]*proto.Config, len(s.configs))
+		confs = append(confs, req)
+		for _, c := range s.configs {
+			if req.GetTime().AsTime().Before(c.Time.AsTime()) {
+				confs = append(confs, c)
+			}
+		}
+		s.configs = confs
+		return &proto.WriteResponse{New: true, Config: s.configs}, nil
+	}
+
+	s.configs = append(s.configs, req)
+	return &proto.WriteResponse{New: true, Config: s.configs}, nil
 }
 
 // Write writes a new value to storage if it is newer than the old value

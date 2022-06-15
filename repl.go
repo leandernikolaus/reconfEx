@@ -7,14 +7,13 @@ import (
 	"io"
 	"os"
 	"strconv"
-	"strings"
 	"time"
 
 	"examplestorage/proto"
 
 	"github.com/google/shlex"
-	"github.com/relab/gorums"
 	"golang.org/x/term"
+	"google.golang.org/protobuf/types/known/timestamppb"
 )
 
 var help = `
@@ -26,10 +25,11 @@ The following commands can be used:
 help                            Show this text
 exit                            Exit the program
 nodes                           Print a list of the available nodes
-rpc   [node index] [operation]	Executes an RPC on the given node.
-qc    [operation]             	Executes a quorum call on all nodes.
-mcast [key] [value]             Executes a multicast write call on all nodes.
-cfg   [config] [operation]   	Executes a quorum call on a configuration.
+rpc    [node index] [operation]	Executes an RPC on the given node.
+qc     [operation]             	Executes a quorum call on all nodes.
+mcast  [key] [value]            Executes a multicast write call on all nodes.
+cfg    [config]              	Updates the default configuration.
+reconf [config]              	Reconfigure to new configuration.
 
 The following operations are supported:
 
@@ -44,11 +44,11 @@ The command performs the 'write' RPC on node 0, and sets 'foo' = 'bar'
 > qc read foo
 The command performs the 'read' quorum call, and returns the value of 'foo'
 
-> cfg 1:3 write foo bar
-The command performs the write quorum call on node 1 and 2
+> cfg 1:3 
+Updates to configuration with nodes 1 and 2
 
-> cfg 0,2 write foo 'bar baz'
-The command performs the write quorum call on node 0 and 2
+> cfg 0,2
+Updates to configuration with nodes 0 and 2
 `
 
 type repl struct {
@@ -122,7 +122,9 @@ func Repl(c *client) {
 		case "qc":
 			r.qc(args[1:])
 		case "cfg":
-			r.qcCfg(args[1:])
+			r.cfgc(args[1:])
+		case "reconf":
+			r.reconf(args[1:])
 		case "mcast":
 			fallthrough
 		case "multicast":
@@ -150,12 +152,12 @@ func (r repl) rpc(args []string) {
 		return
 	}
 
-	if index < 0 || index >= r.cfg.Size() {
-		fmt.Printf("Invalid index. Must be between 0 and %d.\n", r.cfg.Size()-1)
+	if index < 0 || index >= len(r.mgr.Nodes()) {
+		fmt.Printf("Invalid index. Must be between 0 and %d.\n", len(r.mgr.Nodes())-1)
 		return
 	}
 
-	node := r.cfg.Nodes()[index]
+	node := r.mgr.Nodes()[index]
 
 	switch args[1] {
 	case "read":
@@ -165,6 +167,69 @@ func (r repl) rpc(args []string) {
 	case "list":
 		r.listKeysRPC(node)
 	}
+}
+
+func (r repl) reconf(args []string) {
+	if len(args) < 1 {
+		fmt.Println("'reconf' requires a configuration.")
+		return
+	}
+	r.client.reconf(args[0])
+	fmt.Println("Reconfiguration finished")
+}
+
+func (r repl) readRPC(args []string, node *proto.Node) {
+	if len(args) < 1 {
+		fmt.Println("Read requires a key to read.")
+		return
+	}
+	ctx, cancel := context.WithTimeout(context.Background(), time.Second)
+	resp, err := node.ReadRPC(ctx, &proto.ReadRequest{Key: args[0]})
+	cancel()
+	if err != nil {
+		fmt.Printf("Read RPC finished with error: %v\n", err)
+		return
+	}
+	if !resp.GetOK() {
+		fmt.Printf("%s was not found\n", args[0])
+		return
+	}
+	fmt.Printf("%s = %s\n", args[0], resp.GetValue())
+}
+
+func (r repl) writeRPC(args []string, node *proto.Node) {
+	if len(args) < 2 {
+		fmt.Println("Write requires a key and a value to write.")
+		return
+	}
+	ctx, cancel := context.WithTimeout(context.Background(), time.Second)
+	resp, err := node.WriteRPC(ctx, &proto.WriteRequest{Key: args[0], Value: args[1], Time: timestamppb.Now()})
+	cancel()
+	if err != nil {
+		fmt.Printf("Write RPC finished with error: %v\n", err)
+		return
+	}
+	if !resp.GetNew() {
+		fmt.Printf("Failed to update %s: timestamp too old.\n", args[0])
+		return
+	}
+	fmt.Println("Write OK")
+}
+
+func (r repl) listKeysRPC(node *proto.Node) {
+	ctx, cancel := context.WithTimeout(context.Background(), time.Second)
+	resp, err := node.ListKeysRPC(ctx, &proto.ListRequest{})
+	cancel()
+	if err != nil {
+		fmt.Printf("ListKeys RPC finished with error: %v\n", err)
+		return
+	}
+
+	keys := ""
+	for _, k := range resp.GetKeys() {
+		keys += k + ", "
+	}
+	fmt.Println("Keys found: ", keys)
 }
 
 func (r repl) multicast(args []string) {
@@ -187,95 +252,65 @@ func (r repl) qc(args []string) {
 
 	switch args[0] {
 	case "read":
-		r.readQC(args[1:], r.cfg)
+		r.doReadQC(args[1:])
 	case "write":
-		r.writeQC(args[1:], r.cfg)
+		r.doWriteQC(args[1:])
 	case "list":
-		r.listQC(r.cfg)
+		r.doListQC()
 	}
 }
 
-func (r repl) qcCfg(args []string) {
+func (r repl) doReadQC(args []string) {
+	if len(args) < 1 {
+		fmt.Println("Read requires a key to read.")
+		return
+	}
+	resp := r.readQC(args[0], r.cfg)
+	if !resp.GetOK() {
+		fmt.Printf("%s was not found\n", args[0])
+		return
+	}
+	fmt.Printf("%s = %s\n", args[0], resp.GetValue())
+}
+
+func (r repl) doWriteQC(args []string) {
 	if len(args) < 2 {
-		fmt.Println("'cfg' requires a configuration and an operation.")
+		fmt.Println("Write requires a key and a value to write.")
+		return
+	}
+	resp := r.writeQC(args[0], args[1], r.cfg)
+	if !resp.GetNew() {
+		fmt.Printf("Failed to update %s: timestamp too old.\n", args[0])
+		return
+	}
+	fmt.Println("Write OK")
+}
+
+func (r repl) doListQC() {
+
+	resp := r.listQC(r.cfg)
+
+	if len(resp.GetKeys()) == 0 {
+		fmt.Println("No keys found.")
+		return
+	}
+
+	keys := ""
+	for _, k := range resp.GetKeys() {
+		keys += k + ", "
+	}
+	fmt.Println("Keys found: ", keys)
+}
+
+func (r repl) cfgc(args []string) {
+	if len(args) < 1 {
+		fmt.Println("'cfg' requires a configuration.")
 		return
 	}
 	cfg := r.parseConfiguration(args[0])
 	if cfg == nil {
 		return
 	}
-	switch args[1] {
-	case "read":
-		r.readQC(args[2:], cfg)
-	case "write":
-		r.writeQC(args[2:], cfg)
-	case "list":
-		r.listQC(r.cfg)
-	}
-}
 
-func (r repl) parseConfiguration(cfgStr string) (cfg *proto.Configuration) {
-	// configuration using range syntax
-	if i := strings.Index(cfgStr, ":"); i > -1 {
-		var start, stop int
-		var err error
-		numNodes := r.mgr.Size()
-		if i == 0 {
-			start = 0
-		} else {
-			start, err = strconv.Atoi(cfgStr[:i])
-			if err != nil {
-				fmt.Printf("Failed to parse configuration: %v\n", err)
-				return nil
-			}
-		}
-		if i == len(cfgStr)-1 {
-			stop = numNodes
-		} else {
-			stop, err = strconv.Atoi(cfgStr[i+1:])
-			if err != nil {
-				fmt.Printf("Failed to parse configuration: %v\n", err)
-				return nil
-			}
-		}
-		if start >= stop || start < 0 || stop >= numNodes {
-			fmt.Println("Invalid configuration.")
-			return nil
-		}
-		nodes := make([]string, 0)
-		for _, node := range r.mgr.Nodes()[start:stop] {
-			nodes = append(nodes, node.Address())
-		}
-		cfg, err = r.mgr.NewConfiguration(&qspec{cfgSize: stop - start}, gorums.WithNodeList(nodes))
-		if err != nil {
-			fmt.Printf("Failed to create configuration: %v\n", err)
-			return nil
-		}
-		return cfg
-	}
-	// configuration using list of indices
-	if indices := strings.Split(cfgStr, ","); len(indices) > 0 {
-		selectedNodes := make([]string, 0, len(indices))
-		nodes := r.mgr.Nodes()
-		for _, index := range indices {
-			i, err := strconv.Atoi(index)
-			if err != nil {
-				fmt.Printf("Failed to parse configuration: %v\n", err)
-				return nil
-			}
-			if i < 0 || i >= len(nodes) {
-				fmt.Println("Invalid configuration.")
-				return nil
-			}
-			selectedNodes = append(selectedNodes, nodes[i].Address())
-		}
-		cfg, err := r.mgr.NewConfiguration(&qspec{cfgSize: len(selectedNodes)}, gorums.WithNodeList(selectedNodes))
-		if err != nil {
-			fmt.Printf("Failed to create configuration: %v\n", err)
-			return nil
-		}
-		return cfg
-	}
-	fmt.Println("Invalid configuration.")
-	return nil
+	r.cfg = cfg
 }

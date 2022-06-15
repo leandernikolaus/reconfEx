@@ -33,6 +33,16 @@ service Storage {
   rpc ListKeysQC(ListRequest) returns (ListResponse) {
     option (gorums.quorumcall) = true;
   }
+
+  rpc WriteConfigQC(Config) returns (WriteResponse) {
+    option (gorums.quorumcall) = true;
+  }
+}
+
+message Config {
+  bool Started = 1;
+  string Adds = 2;
+  google.protobuf.Timestamp Time = 3;
 }
 
 message ReadRequest { string Key = 1; }
@@ -41,6 +51,7 @@ message ReadResponse {
   bool OK = 1;
   string Value = 2;
   google.protobuf.Timestamp Time = 3;
+  repeated Config Config = 4;
 }
 
 message WriteRequest {
@@ -49,7 +60,10 @@ message WriteRequest {
   google.protobuf.Timestamp Time = 3;
 }
 
-message WriteResponse { bool New = 1; }
+message WriteResponse { 
+  bool New = 1; 
+  repeated Config Config = 2;
+}
 
 message ListRequest { }
 
